@@ -136,6 +136,7 @@
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Network.cpp" />
     <ClCompile Include="NetworkPaint.cpp" />
     <ClCompile Include="RingBuffer.cpp" />
   </ItemGroup>

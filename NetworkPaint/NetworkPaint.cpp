@@ -29,6 +29,7 @@ SOCKET g_clientSock;
 bool g_MouseOnClick = false;
 int g_oldX;
 int g_oldY;
+HWND g_hWnd;
 #define UM_NETWORK ((WM_USER) + (1))
 #pragma comment(linker, "/entry:wWinMainCRTStartup /subsystem:console")
 // 전역 변수 선언
@@ -46,12 +47,126 @@ void PrintErrorMessage(int netWorkEvent, int errCode)
         break;
     }
 }
+void RecvEvent(void)
+{
+    int directEnqueueSize = g_recvRB.DirectEnqueueSize();
+    int recvRet;
+    if (directEnqueueSize == 0)
+    {
+        recvRet = recv(g_clientSock, g_recvRB.GetWriteStartPtr(), g_recvRB.GetFreeSize() - directEnqueueSize, 0);
+
+    }
+    else
+    {
+        recvRet = recv(g_clientSock, g_recvRB.GetWriteStartPtr(), directEnqueueSize, 0);
+    }
+    if (recvRet == 0)
+    {
+        __debugbreak();
+        PostMessage(g_hWnd, WM_DESTROY, 0, 0);
+        return;
+    }
+    else if (recvRet == SOCKET_ERROR)
+    {
+        int errCode = WSAGetLastError();
+        if (errCode != WSAEWOULDBLOCK)
+        {
+            __debugbreak();
+			printf("recv() func error code : %d\n", WSAGetLastError());
+            PostMessage(g_hWnd, WM_DESTROY, 0, 0);
+            return;
+        }
+        __debugbreak(); // 언제 우드블럭이 뜨는지, 사실은 안뜰거같은데 뭔가 보험성으로 넣어놓긴햇다, 아몰랑 예외처리
+    }
+    g_recvRB.MoveRear(recvRet);
+
+    int peekRet;
+    int dequeueRet;
+    HDC hdc = GetDC(g_hWnd);
+    while (true)
+    {
+        stHEADER header;
+        st_DRAW_PACKET drawPacket;
+        peekRet = g_recvRB.Peek(HEADER_SIZE,(char*)&header);
+        if (peekRet == 0)
+        {
+            return;
+        }
+
+        if (header.Len != DRAW_PACKET_SIZE)
+        {
+            __debugbreak();
+        }
+        if (g_recvRB.GetUseSize() < HEADER_SIZE + DRAW_PACKET_SIZE)
+        {
+            return;
+        }
+        g_recvRB.MoveFront(HEADER_SIZE);
+        dequeueRet = g_recvRB.Dequeue((char*)&drawPacket, DRAW_PACKET_SIZE);
+
+
+        // 돌다리도 두들겨보는 예외처리
+        if (dequeueRet < DRAW_PACKET_SIZE)
+        {
+            __debugbreak();
+            PostMessage(g_hWnd, WM_DESTROY, 0, 0);
+        }
+        printf("recv()\n");
+		printf("StartX : %d, StartY : %d ", drawPacket.iStartX, drawPacket.iStartY);
+		printf("EndX: %d, EndY: %d\n", drawPacket.iEndX, drawPacket.iEndY);
+        MoveToEx(hdc, drawPacket.iStartX, drawPacket.iStartY, NULL);
+        LineTo(hdc, drawPacket.iEndX, drawPacket.iEndY);
+    }
+    ReleaseDC(g_hWnd, hdc);
+}
+bool sendSizeRingBufferDirect(int size)
+{
+    int sendRet = 0;
+    while (size > 0)
+    {
+        sendRet = send(g_clientSock, g_sendRB.GetReadStartPtr(), size, 0);
+        if (sendRet == SOCKET_ERROR)
+        {
+            int errCode = WSAGetLastError();
+            if (errCode != WSAEWOULDBLOCK)
+            {
+                printf("send() func error code : %d\n", WSAGetLastError());
+                __debugbreak();
+                PostMessage(g_hWnd, WM_DESTROY, 0, 0);
+            }
+            return false;
+        }
+        size -= sendRet;
+        g_sendRB.MoveFront(sendRet);
+    }
+    return true;
+}
+
+void SendEvent(void)
+{
+    int DirectDequeueSize = g_sendRB.DirectDequeueSize();
+    int useSize = g_sendRB.GetUseSize();
+	int sendRet;
+	if (DirectDequeueSize < useSize)
+	{
+        int remainSize = useSize - DirectDequeueSize;
+        if (!sendSizeRingBufferDirect(DirectDequeueSize)) return;
+        if (!sendSizeRingBufferDirect(remainSize)) return;
+	}
+    else
+    {
+        if (!sendSizeRingBufferDirect(useSize)) return;
+    }
+}
+
+
 void ProcessSocketMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     int netWorkEvent = WSAGETSELECTEVENT(lParam);
     int errCode = WSAGETSELECTERROR(lParam);
     if (errCode != 0)
     {
+        __debugbreak();
         PrintErrorMessage(netWorkEvent, errCode);
         PostMessage(hWnd, WM_DESTROY, 0, 0);
         return;
@@ -72,47 +187,6 @@ void ProcessSocketMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
 }
 
-void RecvEvent(void)
-{
-
-}
-bool sendSizeRingBufferDirect(int size)
-{
-    int sendRet = 0;
-    while (size > 0)
-    {
-        sendRet = send(g_clientSock, g_sendRB.GetReadStartPtr(), size, 0);
-        if (sendRet == SOCKET_ERROR)
-        {
-            int errCode = WSAGetLastError();
-            if (errCode != WSAEWOULDBLOCK)
-            {
-                printf("send() func error code : %d\n", WSAGetLastError());
-                PostQuitMessage(WM_DESTROY);
-            }
-            return false;
-        }
-        size -= sendRet;
-        g_sendRB.MoveFront(sendRet);
-    }
-    return true;
-}
-void SendEvent(void)
-{
-    int DirectDequeueSize = g_sendRB.DirectDequeueSize();
-    int useSize = g_sendRB.GetUseSize();
-	int sendRet;
-	if (DirectDequeueSize < useSize)
-	{
-        int remainSize = useSize - DirectDequeueSize;
-        if (!sendSizeRingBufferDirect(DirectDequeueSize)) return;
-        if (!sendSizeRingBufferDirect(remainSize)) return;
-	}
-    else
-    {
-        if (!sendSizeRingBufferDirect(useSize)) return;
-    }
-}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -137,6 +211,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     wcex.hIconSm = NULL;
     RegisterClassExW(&wcex);
     hWnd = CreateWindowW(L"TEST", L"MyTest", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+    g_hWnd = hWnd;
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
     setlocale(LC_ALL, "");
@@ -203,17 +278,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(hWnd, &ps);
-
-		// 그리기 작업 수행
-		HPEN hOldPen = (HPEN)SelectObject(hdc, g_hGridPen);
-		HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, g_hTileBrush);
-
-		// 예시로 사각형 그리기
-		Rectangle(hdc, 600, 10, 100, 100);
-
-		// 이전 GDI 객체 복원
-		SelectObject(hdc, hOldPen);
-		SelectObject(hdc, hOldBrush);
 		EndPaint(hWnd, &ps);
     }
     break;
@@ -237,46 +301,36 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             drawPacket.iStartX = g_oldX;
             drawPacket.iStartY = g_oldY;
 
+            printf("send()\n");
+            printf("StartX : %d, StartY : %d ", drawPacket.iStartX, drawPacket.iStartY);
+            printf("EndX: %d, EndY: %d\n", drawPacket.iEndX, drawPacket.iEndY);
             if (g_sendRB.GetFreeSize() < HEADER_SIZE + DRAW_PACKET_SIZE)
                 __debugbreak();
 
-            int DirectEnqueueSize = g_sendRB.DirectEnqueueSize();
-            if (DirectEnqueueSize >= HEADER_SIZE)
+            int ret;
+            ret = g_sendRB.Enqueue((char*)&header, HEADER_SIZE);
+            if (ret == 0)
             {
-                memcpy_s(g_sendRB.GetWriteStartPtr(), HEADER_SIZE, &header, HEADER_SIZE);
-                g_sendRB.MoveRear(HEADER_SIZE);
+                __debugbreak();
+                PostMessage(g_hWnd, WM_DESTROY, 0, 0);
             }
-            else
+            ret = g_sendRB.Enqueue((char*)&drawPacket, DRAW_PACKET_SIZE);
+            if (ret == 0)
             {
-                memcpy_s(g_sendRB.GetWriteStartPtr(), DirectEnqueueSize, &header, DirectEnqueueSize);
-                g_sendRB.MoveRear(DirectEnqueueSize);
-                int temp = HEADER_SIZE - DirectEnqueueSize;
-                memcpy_s(g_sendRB.GetWriteStartPtr(), temp, (char*)&header + DirectEnqueueSize, temp);
-                g_sendRB.MoveRear(temp);
+                __debugbreak();
+                PostMessage(g_hWnd, WM_DESTROY, 0, 0);
             }
-            DirectEnqueueSize = g_sendRB.DirectEnqueueSize();
-            if (DirectEnqueueSize >= DRAW_PACKET_SIZE)
-            {
-                memcpy_s(g_sendRB.GetWriteStartPtr(), DRAW_PACKET_SIZE, &drawPacket, DRAW_PACKET_SIZE);
-                g_sendRB.MoveRear(DRAW_PACKET_SIZE);
-            }
-            else
-            {
-                memcpy_s(g_sendRB.GetWriteStartPtr(), DirectEnqueueSize, (char*)&drawPacket, DirectEnqueueSize);
-                g_sendRB.MoveRear(DirectEnqueueSize);
-                int temp = DRAW_PACKET_SIZE - DirectEnqueueSize;
-                memcpy_s(g_sendRB.GetWriteStartPtr(), temp, (char*)&drawPacket + DirectEnqueueSize, temp);
-                g_sendRB.MoveRear(temp);
-            }
-            writeEvent();
-        }
+			SendEvent();
+		}
         g_oldX = curX;
         g_oldY = curY;
     }
+    break;
     case WM_DESTROY:
     {
         DeleteObject(g_hGridPen);
         DeleteObject(g_hTileBrush);
+        __debugbreak();
         closesocket(g_clientSock);
         PostQuitMessage(0);
     }
@@ -289,3 +343,4 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     return 0;
 }
+
